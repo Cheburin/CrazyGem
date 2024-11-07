@@ -1,0 +1,1338 @@
+﻿#include "main.h"
+
+#include "DXUTgui.h"
+#include "SDKmisc.h"
+
+extern GraphicResources * G;
+
+extern SwapChainGraphicResources * SCG;
+
+extern SceneState scene_state;
+
+extern BlurHandling blur_handling;
+
+extern CDXUTTextHelper*                    g_pTxtHelper;
+
+ID3D11ShaderResourceView* null[] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
+
+inline void set_scene_constant_buffer(ID3D11DeviceContext* context){
+	G->scene_constant_buffer->SetData(context, scene_state);
+};
+
+inline void set_blur_constant_buffer(ID3D11DeviceContext* context){
+	//G->blur_constant_buffer->SetData(context, blur_handling);
+};
+
+void RenderText()
+{
+	g_pTxtHelper->Begin();
+	g_pTxtHelper->SetInsertionPos(2, 0);
+	g_pTxtHelper->SetForegroundColor(D3DXCOLOR(1.0f, 1.0f, 0.0f, 1.0f));
+	g_pTxtHelper->DrawTextLine(DXUTGetFrameStats(true && DXUTIsVsyncEnabled()));
+	g_pTxtHelper->DrawTextLine(DXUTGetDeviceStats());
+
+	g_pTxtHelper->End();
+}
+DirectX::XMFLOAT4 lightDirection;
+DirectX::XMFLOAT3 lightPosition;
+DirectX::XMFLOAT3 lightLookAt;
+
+struct Cylinder{
+	SimpleMath::Vector3 A;
+	SimpleMath::Vector3 B;
+	float r;
+	Cylinder(float _1, float _2, float _3, float _4, float _5, float _6)
+	{
+		A.x = _1;
+		A.y = _2;
+		A.z = _3;
+		B.x = _4;
+		B.y = _5;
+		B.z = _6;
+		r = 5;
+		//A += SimpleMath::Vector3(-50, 0, 0);// 30);
+		//B += SimpleMath::Vector3(-50, 0, 0);// 30);
+	}
+};
+struct Line{
+	SimpleMath::Vector3 A;
+	SimpleMath::Vector3 B;
+	Line(float _1, float _2, float _3, float _4, float _5, float _6)
+	{
+		A.x = _1;
+		A.y = _2;
+		A.z = _3;
+		B.x = _4;
+		B.y = _5;
+		B.z = _6;
+	}
+};
+
+SimpleMath::Vector3 velocity(0, 0, 0);// -5 * 0.2, -7 * 0.2, -8 * 0.2);
+Cylinder cylinder(0, 0, 0, 0, 20, 0);// 50, 2, 8, 11, 0, 50);// 30, 20 + 20, 10, 0, 40 + 20, -10);
+Line line(50, 2, 8, 11, 0, 50);
+extern bool fire;
+extern bool forcePush;
+void CALLBACK OnFrameMove(double fTime, float fElapsedTime, void* pUserContext)
+{
+	static float angle = 270.0f;
+	float radians;
+	static float offsetX = 9.0f;
+
+
+	// Update direction of the light.
+	angle -= 0.03f * fElapsedTime * 1000;
+	if (angle < 90.0f)
+	{
+		angle = 270.0f;
+		offsetX = 9.0f;
+	}
+	radians = angle * 0.0174532925f;
+	lightDirection = DirectX::XMFLOAT4(-5-40, 0-80, 0.0f, 0.0f);
+
+	// Update the lookat and position.
+	offsetX -= 0.003f * fElapsedTime * 1000;
+	lightPosition = DirectX::XMFLOAT3(0.0f + offsetX, 10.0f, 1.0f);
+	lightLookAt = DirectX::XMFLOAT3(0.0f - offsetX, 0.0f, 2.0f);
+
+	/////////////////////////////////////////////////////////////////////////////////
+	lightPosition = DirectX::XMFLOAT3(40.0f, 80.0f, 0.0f);
+	lightLookAt = DirectX::XMFLOAT3(-5, 0.0f, 0.0f);
+	auto ld = SimpleMath::Vector3(lightLookAt) - SimpleMath::Vector3(lightPosition);
+	ld.Normalize();
+	lightDirection = SimpleMath::Vector4(ld);
+	/////////////////////////////////////////////////////////////////////////////////
+
+	////for test collision
+	{
+		if (!fire && velocity.Length() == .0){
+			SimpleMath::Matrix m = scene_state.mInvView;
+			m = m.Transpose();
+			m = SimpleMath::Matrix::CreateTranslation(0, 0, 25) * m;
+			cylinder.A = SimpleMath::Vector3::Transform(SimpleMath::Vector3(0, 0, 0), m);
+			cylinder.B = SimpleMath::Vector3::Transform(SimpleMath::Vector3(0, 20, 0), m);
+		}
+	}
+	{
+		if (fire && velocity.Length() == .0 ){
+			SimpleMath::Matrix m = scene_state.mInvView;
+			m = m.Transpose();
+			SimpleMath::Vector3 f = -1.0 * m.Forward();
+			f.Normalize();
+			velocity = 2.0f*f;
+		}
+	}
+	////
+
+	Camera::OnFrameMove(fTime, fElapsedTime, pUserContext);
+}
+
+void renderSceneIntoGBuffer(ID3D11Device* pd3dDevice, ID3D11DeviceContext* pd3dImmediateContext);
+void postProccessGBuffer(ID3D11Device* pd3dDevice, ID3D11DeviceContext* context);
+void postProccessBlur(ID3D11Device* pd3dDevice, ID3D11DeviceContext* context, _In_opt_ std::function<void __cdecl()> setHState, _In_opt_ std::function<void __cdecl()> setVState);
+
+void ortho_box_set_world_matrix2(SimpleMath::Matrix w);
+
+void clearAndSetRenderTarget(ID3D11DeviceContext* context, float ClearColor[], int n, ID3D11RenderTargetView** pRTV, ID3D11DepthStencilView* pDSV){
+	for (int i = 0; i < n; i++)
+		context->ClearRenderTargetView(pRTV[i], ClearColor);
+
+	context->ClearDepthStencilView(pDSV, D3D11_CLEAR_DEPTH, 1.0f, 0);
+
+	context->OMSetRenderTargets(n, pRTV, pDSV); //renderTargetViewToArray(pRTV) DXUTGetD3D11RenderTargetView
+}
+void renderScene(ID3D11Device* pd3dDevice, ID3D11DeviceContext* context, float fElapsedTime, IEffect* effect, bool renderIntoShadowMap);
+void CALLBACK OnD3D11FrameRender(ID3D11Device* pd3dDevice, ID3D11DeviceContext* context,
+	double fTime, float fElapsedTime, void* pUserContext)
+{
+	float clearColor[4] = { 0.0f, 0.5f, 0.8f, 1.0f };
+	D3D11_VIEWPORT vp;
+	vp.TopLeftX = 0;
+	vp.TopLeftY = 0;
+	vp.Width = 1024;
+	vp.Height = 1024;
+	vp.MinDepth = 0;
+	vp.MaxDepth = 1;
+	context->RSSetViewports(1, &vp);
+
+	{
+		context->PSSetShaderResources(0, 5, null);
+	}
+	{
+		clearAndSetRenderTarget(context, clearColor, 1, renderTargetViewToArray(SCG->depthV.Get()), SCG->depthStencil1V.Get());// SCG->depthStencil1V.Get());// SCG->depthStencilV.Get()); ///SCG->colorV.Get(), SCG->normalV.Get()
+
+		renderScene(pd3dDevice, context, fElapsedTime, G->model_effect1.get(), true);
+	}
+	{
+		D3D11_VIEWPORT vp;
+		vp.TopLeftX = 0;
+		vp.TopLeftY = 0;
+		vp.Width = scene_state.vFrustumParams.x;
+		vp.Height = scene_state.vFrustumParams.y;
+		vp.MinDepth = 0;
+		vp.MaxDepth = 1;
+		context->RSSetViewports(1, &vp);
+
+		clearAndSetRenderTarget(context, clearColor, 1, renderTargetViewToArray(DXUTGetD3D11RenderTargetView()), DXUTGetD3D11DepthStencilView());// SCG->depthStencil1V.Get());// SCG->depthStencilV.Get()); ///SCG->colorV.Get(), SCG->normalV.Get()
+
+		context->PSSetShaderResources(2, 1, shaderResourceViewToArray(SCG->depthSRV.Get()));
+
+		renderScene(pd3dDevice, context, fElapsedTime, G->model_effect2.get(), false);
+
+		{
+			context->GSSetConstantBuffers(0, 1, constantBuffersToArray(*(G->scene_constant_buffer)));
+
+			ortho_box_set_world_matrix();
+
+			set_scene_constant_buffer(context);
+
+			ortho_box_draw(context, G->ortho_box_effect.get(), 0, [=]{
+				context->OMSetBlendState(G->render_states->Opaque(), Colors::Black, 0xFFFFFFFF);
+				context->RSSetState(G->render_states->Wireframe());
+				context->OMSetDepthStencilState(G->render_states->DepthDefault(), 0);
+			});
+		}
+	}
+	{
+		context->PSSetShaderResources(0, 5, null);
+	}
+
+}
+/*
+void CALLBACK OnD3D11FrameRender(ID3D11Device* pd3dDevice, ID3D11DeviceContext* context,
+	double fTime, float fElapsedTime, void* pUserContext)
+{
+	float clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+
+	clearAndSetRenderTarget(context, clearColor, 1, renderTargetViewToArray(DXUTGetD3D11RenderTargetView()), DXUTGetD3D11DepthStencilView());
+
+	context->VSSetConstantBuffers(0, 1, constantBuffersToArray(*(G->scene_constant_buffer)));
+
+	context->PSSetSamplers(0, 2, samplerStateToArray(G->render_states->AnisotropicClamp(), G->render_states->AnisotropicWrap()));
+
+	context->PSSetShaderResources(2, 1, shaderResourceViewToArray(G->projected_texture.Get()));
+
+	plane_set_world_matrix();
+
+	set_scene_constant_buffer(context);
+
+	plane_draw(context, G->model_with_texture.get(), G->model_input_layout.Get(), [=]{
+		context->PSSetShaderResources(0, 1, shaderResourceViewToArray(G->metal_texture.Get()));
+
+		context->OMSetBlendState(G->render_states->Opaque(), Colors::Black, 0xFFFFFFFF);
+		context->RSSetState(G->render_states->CullCounterClockwise());
+		context->OMSetDepthStencilState(G->render_states->DepthDefault(), 0);
+	});
+
+	cube_set_world_matrix();
+
+	set_scene_constant_buffer(context);
+
+	cube_draw(context, G->model_with_texture.get(), G->model_input_layout.Get(), [=]{
+		context->PSSetShaderResources(0, 1, shaderResourceViewToArray(G->wall_texture.Get()));
+
+		context->OMSetBlendState(G->render_states->Opaque(), Colors::Black, 0xFFFFFFFF);
+		context->RSSetState(G->render_states->CullCounterClockwise());
+		context->OMSetDepthStencilState(G->render_states->DepthDefault(), 0);
+	});
+}
+*/
+/*
+void CALLBACK OnD3D11FrameRender(ID3D11Device* pd3dDevice, ID3D11DeviceContext* context,
+	double fTime, float fElapsedTime, void* pUserContext)
+{
+	D3D11_VIEWPORT vp;
+	vp.TopLeftX = 0;
+	vp.TopLeftY = 0;
+	vp.Width = scene_state.vFrustumParams.x;
+	vp.Height = scene_state.vFrustumParams.y;
+	vp.MinDepth = 0;
+	vp.MaxDepth = 1;
+	context->RSSetViewports(1, &vp);
+
+	float clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+
+	{
+		context->PSSetShaderResources(0, 5, null);
+	}
+	{
+		clearAndSetRenderTarget(context, clearColor, 1, renderTargetViewToArray(SCG->depthV.Get()), DXUTGetD3D11DepthStencilView());// SCG->depthStencil1V.Get());// SCG->depthStencilV.Get()); ///SCG->colorV.Get(), SCG->normalV.Get()
+
+		renderScene(pd3dDevice, context, G->model_effect1.get());
+
+		clearAndSetRenderTarget(context, clearColor, 1, renderTargetViewToArray(SCG->colorV.Get()), DXUTGetD3D11DepthStencilView());// SCG->depthStencil1V.Get());// SCG->depthStencilV.Get()); ///SCG->colorV.Get(), SCG->normalV.Get()
+
+			context->PSSetShaderResources(2, 1, shaderResourceViewToArray(SCG->depthSRV.Get()));
+
+		renderScene(pd3dDevice, context, G->model_effect2.get());
+
+		//clearAndSetRenderTarget(context, clearColor, 1, renderTargetViewToArray(SCG->colorV.Get()), SCG->depthStencil2V.Get());// SCG->depthStencilV.Get()); ///SCG->colorV.Get(), SCG->normalV.Get()
+
+		//renderScene(pd3dDevice, context, G->model_effect2.get());
+	}
+	{
+		context->PSSetShaderResources(0, 5, null);
+	}
+	postProccessBlur(pd3dDevice, context,
+		[=]{
+			float clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+			clearAndSetRenderTarget(context, clearColor, 1, renderTargetViewToArray(SCG->colorSecondV.Get()), DXUTGetD3D11DepthStencilView());
+			context->PSSetShaderResources(0, 1, shaderResourceViewToArray(SCG->colorSRV.Get()));
+		},
+		[=]{
+			float clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+			context->PSSetShaderResources(0, 5, null);
+			clearAndSetRenderTarget(context, clearColor, 1, renderTargetViewToArray(SCG->colorV.Get()), DXUTGetD3D11DepthStencilView());
+			context->PSSetShaderResources(0, 1, shaderResourceViewToArray(SCG->colorSecondSRV.Get()));
+		}
+	);
+	{
+		context->PSSetShaderResources(0, 5, null);
+	}
+	ID3D11RenderTargetView* rt;
+	{
+		clearAndSetRenderTarget(context, clearColor, 1, renderTargetViewToArray(DXUTGetD3D11RenderTargetView()), DXUTGetD3D11DepthStencilView());
+
+			//context->PSSetShaderResources(1, 2, shaderResourceViewToArray(SCG->depthStencil1SRV.Get(), SCG->depthStencil2SRV.Get()));
+			context->PSSetShaderResources(1, 1, shaderResourceViewToArray(SCG->colorSRV.Get()));
+
+		renderScene(pd3dDevice, context, G->model_shadow_effect.get());
+
+		//postProccessGBuffer(pd3dDevice, context);
+	}
+	RenderText();
+}
+*/
+SimpleMath::Vector2 getDistanceBetweenSkewLines(SimpleMath::Vector3 S1, SimpleMath::Vector3 V1, SimpleMath::Vector3 S2, SimpleMath::Vector3 V2){
+	using namespace SimpleMath;
+	float c = 1.0f / (pow(V1.Dot(V2), 2.0f) - V1.Dot(V1)*V2.Dot(V2));
+	float a = (S2 - S1).Dot(V1);
+	float b = (S2 - S1).Dot(V2);
+	Vector2 ret;
+	ret.x = c*(-V2.Dot(V2)*a + V1.Dot(V2)*b);
+	ret.y = c*(-V1.Dot(V2)*a + V1.Dot(V1)*b);
+	return ret;
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+bool getLowestRoot(float a, float b, float c, float maxR, float* root)
+{
+	// Check if a solution exists
+	float determinant = b*b - 4.0f*a*c;
+	// If determinant is negative it means no solutions.
+	if (determinant < 0.0f) return false;
+	// calculate the two roots: (if determinant == 0 then
+	// x1==x2 but lets disregard that slight optimization)
+	float sqrtD = sqrt(determinant);
+	float r1 = (-b - sqrtD) / (2 * a);
+	float r2 = (-b + sqrtD) / (2 * a);
+	// Sort so x1 <= x2
+	if (r1 > r2) {
+		float temp = r2;
+		r2 = r1;
+		r1 = temp;
+	}
+	//*root = r1;
+	//return true;
+	// Get lowest root:
+	if (0.0f <= r1 && r1 <= maxR) {
+		*root = r1;
+		return true;
+	}
+	// It is possible that we want x2 - this can happen
+	// if x1 < 0
+	if (0.0f <= r2 && r2 <= maxR) {
+		*root = r2;
+		return true;
+	}
+
+	// No (valid) solutions
+	return false;
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+SimpleMath::Vector3 impactPoint;
+SimpleMath::Vector3 impactNormal;
+SimpleMath::Vector3 capsuleDirecion;
+bool globalCollision = false;
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+bool collisionWithEdge(const Cylinder& cylinder, const Line& line, const SimpleMath::Vector3 & worldDistance, SimpleMath::Vector3 & impactPoint, float & impactT )
+{
+	bool collision = false;
+	float epsilon = 0.001f;
+	float flt_epsilon = FLT_EPSILON;
+	SimpleMath::Matrix ToCylinderLocalSpace;
+	auto cylinderBA = cylinder.B - cylinder.A;
+	auto lineBA = line.B - line.A;
+
+	impactT = 1.0f;
+
+	{
+		// std make frame
+		// trivial impl
+		SimpleMath::Vector3 X(1, 0, 0);
+		auto Y = cylinderBA;
+		Y.Normalize();
+
+		// check X collinearity
+		if (1.0f - abs(X.Dot(Y)) < epsilon)
+		{
+			X = SimpleMath::Vector3(0, 1, 0);
+		}
+
+		auto Z = X.Cross(Y);
+		X = Y.Cross(Z);
+
+		X.Normalize();
+		Y.Normalize();
+		Z.Normalize();
+		// Cylinder it is Y
+		ToCylinderLocalSpace = SimpleMath::Matrix(X, Y, Z);
+		ToCylinderLocalSpace = ToCylinderLocalSpace.Transpose();
+	}
+	//collide end spheres with line points (3d)
+	{
+		float t = 1, a, b, c;
+
+		bool rootFound = false;
+		int lastRootFoundOnIndex1, lastRootFoundOnIndex2;
+
+		SimpleMath::Vector3 test2[] = { cylinder.A, cylinder.B };
+		SimpleMath::Vector3 test1[] = { line.A, line.B };
+
+		a = worldDistance.Dot(worldDistance);
+
+		for (int i = 0; i < 2; i++)
+		{
+			for (int j = 0; j < 2; j++)
+			{
+				auto delta = test1[j] - test2[i];
+
+				b = 2.0f*worldDistance.Dot(delta);
+				c = delta.Dot(delta) - pow(cylinder.r + epsilon, 2.0f);
+
+				//very very strang equation
+				{
+					auto deltaLength = delta.Length();
+					if (deltaLength < (cylinder.r + epsilon))
+					{
+						if (i == 0)
+						{
+							if (cylinderBA.Dot(delta) <= .0f)
+							{
+								rootFound = true;
+								lastRootFoundOnIndex1 = j;
+								lastRootFoundOnIndex2 = i;
+								t = 0.0f;
+							}
+						}
+						else
+						{
+							if (cylinderBA.Dot(delta) >= .0f)
+							{
+								rootFound = true;
+								lastRootFoundOnIndex1 = j;
+								lastRootFoundOnIndex2 = i;
+								t = 0.0f;
+							}
+						}
+					}
+				}
+				if (getLowestRoot(a, b, c, t, &t))
+				{
+					rootFound = true;
+					lastRootFoundOnIndex1 = j;
+					lastRootFoundOnIndex2 = i;
+				}
+			}
+		}
+
+		if (rootFound && .0f <= t&&t <= 1.0f)
+		{
+			auto lineX = test1[lastRootFoundOnIndex1];
+			auto cylinderX = &(lastRootFoundOnIndex2 == 0 ? cylinder.A : cylinder.B);
+
+			auto partOfWorldDistance = t*worldDistance;
+
+			auto newCylinderEndPoint = *cylinderX + partOfWorldDistance;
+
+			auto ret = lineX - newCylinderEndPoint;
+
+			if (lastRootFoundOnIndex2 == 0)
+			{
+				collision = cylinderBA.Dot(ret) <= .0f;
+			}
+			else
+			{
+				collision = cylinderBA.Dot(ret) >= .0f;
+			}
+
+			if (collision)
+			{
+				auto tmp1 = lineX;
+				auto tmp2 = newCylinderEndPoint;
+				auto delta = tmp1 - tmp2;
+				delta.Normalize();
+				impactPoint = cylinder.r * delta + tmp2;
+				impactT = t;
+			}
+		}
+	}
+	//collide end spheres with line by self (3d)
+	if (!collision)
+	{
+		float t = 1, a, b, c;
+
+		bool rootFound = false;
+		int lastRootFoundOnIndex;
+
+		SimpleMath::Vector3 test[] = { cylinder.A, cylinder.B };
+
+		auto VA = worldDistance.Dot(lineBA);
+		auto AA = lineBA.Dot(lineBA);
+		auto VV = worldDistance.Dot(worldDistance);
+
+		a = VV - pow(VA, 2.0f) / AA;
+
+		for (int i = 0; i < 2; i++)
+		{
+			auto S = test[i] - line.A;
+			auto SA = S.Dot(lineBA);
+			auto SS = S.Dot(S);
+			auto SV = S.Dot(worldDistance);
+			auto VA = worldDistance.Dot(lineBA);
+
+			b = SV - (SA*VA) / AA;
+			c = SS - pow(cylinder.r + epsilon, 2.0f) - pow(SA, 2.0f) / AA;
+
+			//very strange equation
+			{
+				auto cylinderX = test[i];
+				auto ret = (cylinderX - line.A).Dot(lineBA) / lineBA.Dot(lineBA);
+				if (.0f <= ret&&ret <= 1.0f)
+				{
+					auto lineX = line.A + ret*lineBA;
+					auto delta = lineX - cylinderX;
+					auto deltaLength = delta.Length();
+					if (deltaLength < (cylinder.r + epsilon))
+					{
+						if (i == 0)
+						{
+							if (cylinderBA.Dot(delta) <= .0f)
+							{
+								rootFound = true;
+								lastRootFoundOnIndex = i;
+								t = 0.0f;
+							}
+						}
+						else
+						{
+							if (cylinderBA.Dot(delta) >= .0f)
+							{
+								rootFound = true;
+								lastRootFoundOnIndex = i;
+								t = 0.0f;
+							}
+						}
+					}
+				}
+			}
+			if (getLowestRoot(a, 2.0f*b, c, t, &t))
+			{
+				rootFound = true;
+				lastRootFoundOnIndex = i;
+			}
+		}
+
+		if (rootFound && .0f <= t&&t <= 1.0f)
+		{
+			auto cylinderX = &(lastRootFoundOnIndex == 0 ? cylinder.A : cylinder.B);
+
+			auto partOfWorldDistance = t*worldDistance;
+
+			auto newCylinderEndPoint = *cylinderX + partOfWorldDistance;
+
+			auto ret = (newCylinderEndPoint - line.A).Dot(lineBA) / lineBA.Dot(lineBA);
+
+			if (.0f <= ret&&ret <= 1.0f)
+			{
+				auto lineX = line.A + ret*lineBA;
+
+				if (lastRootFoundOnIndex == 0)
+				{
+					collision = cylinderBA.Dot(lineX - *cylinderX) <= .0f;
+				}
+				else
+				{
+					collision = cylinderBA.Dot(lineX - *cylinderX) >= .0f;
+				}
+
+				if (collision)
+				{
+					auto tmp1 = lineX;
+					auto tmp2 = newCylinderEndPoint;
+					auto delta = tmp1 - tmp2;
+					delta.Normalize();
+					impactPoint = cylinder.r * delta + tmp2;
+					impactT = t;
+				}
+			}
+		}
+	}
+	//prepare for 2d
+	//All to CylinderLocalSpace
+	auto d = SimpleMath::Vector3::TransformNormal(lineBA, ToCylinderLocalSpace);
+	auto s1 = SimpleMath::Vector3::Transform(line.A, ToCylinderLocalSpace);
+	auto s2 = SimpleMath::Vector3::Transform(line.B, ToCylinderLocalSpace);
+	auto origin = SimpleMath::Vector3::Transform(cylinder.A, ToCylinderLocalSpace);
+	auto distance = SimpleMath::Vector3::TransformNormal(worldDistance, ToCylinderLocalSpace);
+	//project line to XZ , project distance to XZ , project cylinder.A to XZ
+	SimpleMath::Vector2 _d(d.x, d.z);
+	SimpleMath::Vector2 _s1(s1.x, s1.z);
+	SimpleMath::Vector2 _s2(s2.x, s2.z);
+	SimpleMath::Vector2 _origin(origin.x, origin.z);
+	SimpleMath::Vector2 _distance(distance.x, distance.z);
+	//collide with line end points (2d)
+	if (!collision)
+	{
+		float t = 1, a, b, c;
+
+		bool rootFound = false;
+		int testCount = 2, lastRootFoundOnIndex;
+		SimpleMath::Vector2 test[] = { _origin - _s1, _origin - _s2 };
+		SimpleMath::Vector3 result[] = { line.A, line.B };
+
+		if (_d.Length() <= flt_epsilon)
+		{
+			testCount = 1;
+			result[0] = .5f*(line.A + line.B);
+		}
+
+		a = _distance.Dot(_distance);
+
+		for (int i = 0; i < testCount; i++)
+		{
+			b = 2.0f*_distance.Dot(test[i]);
+			c = test[i].Dot(test[i]) - pow(cylinder.r + epsilon, 2.0f);
+
+			//very strange equation
+			{
+				auto deltaLength = (test[i]).Length();
+				if (deltaLength < (cylinder.r + epsilon))
+				{
+					auto lineX = result[i];
+					auto ret = (lineX - cylinder.A).Dot(cylinderBA) / cylinderBA.Dot(cylinderBA);
+					if (.0f <= ret&&ret <= 1.0f)
+					{
+						rootFound = true;
+						lastRootFoundOnIndex = i;
+						t = 0.0f;
+					}
+				}
+			}
+			if (getLowestRoot(a, b, c, t, &t))
+			{
+				rootFound = true;
+				lastRootFoundOnIndex = i;
+			}
+		}
+
+		if (rootFound && .0f <= t&&t <= 1.0f)
+		{
+			auto lineX = result[lastRootFoundOnIndex];
+
+			auto partOfWorldDistance = SimpleMath::Vector3::TransformNormal(t*distance, ToCylinderLocalSpace.Transpose());
+
+			auto newCylinderEndPoint = cylinder.A + partOfWorldDistance;
+
+			auto ret = (lineX - newCylinderEndPoint).Dot(cylinderBA) / cylinderBA.Dot(cylinderBA);
+
+			if (.0f <= ret&&ret <= 1.0f)
+			{
+				collision = true;
+
+				auto tmp1 = lineX;
+				auto tmp2 = newCylinderEndPoint + ret * cylinderBA;
+				auto delta = tmp1 - tmp2;
+				delta.Normalize();
+				impactPoint = cylinder.r*delta + tmp2;
+				impactT = t;
+			}
+		}
+	}
+	//collide with line by self (2d)
+	//check when |_d| near epsilon, equation of line is degenerate, skip this
+	if (!collision && _d.Length() > flt_epsilon)
+	{
+		//make line equation
+		_d.Normalize();
+		SimpleMath::Vector3 pLine(_d.y, -_d.x, _s1.y*_d.x - _s1.x*_d.y);
+		pLine *= (1.0 / sqrt(pLine.x*pLine.x + pLine.y*pLine.y));
+		//swept circle into XZ
+		auto lineDotS = pLine.Dot(SimpleMath::Vector3(_origin.x, _origin.y, 1.0f));
+		auto lineDotV = pLine.Dot(SimpleMath::Vector3(_distance.x, _distance.y, 0.0f));
+		//test sign of half space
+		float sign = lineDotS < 0.0f ? -1.0f : 1.0f;
+		
+		float t = 1.0f;
+		bool rootFound = false;
+		SimpleMath::Vector3 _impactPoint;
+
+		//very strange equation
+		{
+			if (abs(lineDotS) < (cylinder.r + epsilon))
+			{
+				auto ret = getDistanceBetweenSkewLines(cylinder.A, cylinderBA, line.A, lineBA);
+
+				//check only if impact possess line cut (with finit cylinder)
+				if (.0f <= ret.x&&ret.x <= 1.0f && .0f <= ret.y&&ret.y <= 1.0f)
+				{
+					t = 0.0f;
+					rootFound = true;
+					auto tmp1 = line.A + ret.y * lineBA;
+					auto tmp2 = cylinder.A + ret.x * cylinderBA;
+					auto delta = (tmp1 - tmp2);
+					delta.Normalize();
+					_impactPoint = cylinder.r*delta + tmp2;
+				}
+			}
+		}
+		//test if collision ocure
+		if (abs(lineDotV) > flt_epsilon)
+		{
+			float last_t = ((cylinder.r + epsilon) * sign - lineDotS) / lineDotV;
+			if (0.0f <= last_t&&last_t <= 1.0f)
+			{
+				auto partOfWorldDistance = SimpleMath::Vector3::TransformNormal(last_t*distance, ToCylinderLocalSpace.Transpose());
+
+				auto newCylinderEndPoint = cylinder.A + partOfWorldDistance;
+
+				auto ret = getDistanceBetweenSkewLines(newCylinderEndPoint, cylinderBA, line.A, lineBA);
+
+				//check only if impact possess line cut (with finit cylinder)
+				if (.0f <= ret.x&&ret.x <= 1.0f && .0f <= ret.y&&ret.y <= 1.0f)
+				{
+					rootFound = true;
+					t = last_t;
+					auto tmp1 = line.A + ret.y * lineBA;
+					auto tmp2 = newCylinderEndPoint + ret.x * cylinderBA;
+					auto delta = (tmp1 - tmp2);
+					delta.Normalize();
+					_impactPoint = cylinder.r*delta + tmp2;
+				}
+			}
+		}
+		
+		if (rootFound)
+		{
+			collision = true;
+
+			impactPoint = _impactPoint;
+			impactT = t;
+		}
+	}
+	return collision;
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+SimpleMath::Vector4 vec4(SimpleMath::Vector3 v3, float w)
+{
+	return SimpleMath::Vector4(v3.x, v3.y, v3.z, w);
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+bool collisionWithFace(const Cylinder & cylinder, const SimpleMath::Matrix& faceBasis, const SimpleMath::Vector2& faceHalfSize, const SimpleMath::Vector3 & worldDistance, SimpleMath::Vector3 & impactPoint, float & impactT){
+	float epsilon = 0.001f;
+
+	bool collision = false;
+
+	SimpleMath::Vector4 pFace = vec4(faceBasis.Backward(), -faceBasis.Backward().Dot(faceBasis.Translation()));
+
+	auto faceDotV = pFace.Dot(vec4(worldDistance, 0.0f));
+
+	impactT = 1.0f;
+
+	{
+		SimpleMath::Vector3 test[2] = { cylinder.A, cylinder.B };
+
+		{
+			float t = 1.0f;
+			int index = -1;
+			for (int i = 0; i < 2; i++)
+			{
+				auto cylinderX = test[i];
+				auto faceDotS = pFace.Dot(vec4(cylinderX, 1.0f));
+				float sign = faceDotS < 0.0f ? -1.0f : 1.0f;
+
+				float last_t = ((cylinder.r + epsilon) * sign - faceDotS) / faceDotV;
+				if (-epsilon <= last_t && last_t <= t)
+				{
+					t = last_t;
+					index = i;
+					if (t < epsilon)
+					{
+						t = 0.0f;
+					}
+				}
+			}
+			if (index != -1)
+			{
+				auto cylinderX = test[index];
+
+				auto partOfWorldDistance = t*worldDistance;
+
+				auto newCylinderEndPoint = cylinderX + partOfWorldDistance;
+
+				auto relNewCylinderEndPoint = newCylinderEndPoint - faceBasis.Translation();
+
+				if (abs(faceBasis.Right().Dot(relNewCylinderEndPoint)) <= faceHalfSize.x)
+				{
+					if (abs(faceBasis.Up().Dot(relNewCylinderEndPoint)) <= faceHalfSize.y)
+					{
+						collision = true;
+
+						float sign = faceDotV < 0.0f ? -1.0f : 1.0f;
+						
+						impactPoint = newCylinderEndPoint + sign*cylinder.r*faceBasis.Backward();
+						impactT = t;
+					}
+				}
+			}
+		}
+	}
+
+	return collision;
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+bool collisionWithBox(const Cylinder & cylinder, const SimpleMath::Matrix& boxBasis, const SimpleMath::Vector3& boxHalfSize, const SimpleMath::Vector3 & worldDistance, SimpleMath::Vector3 & impactPoint, SimpleMath::Vector3 & impactNormal, float & impactT)
+{
+	float epsilon = 0.001f;
+	
+	bool collison = false;
+
+	auto cylinderBA = cylinder.B - cylinder.A;
+
+	SimpleMath::Vector3 vFaceNormal[] = { boxBasis.Right(), boxBasis.Up(), boxBasis.Backward() };
+	float vBoxHalfSize[] = { boxHalfSize.x, boxHalfSize.y, boxHalfSize.z };
+
+	impactT = 1.0f;
+
+	for (int i = 0; i < 3; i++)
+	{
+		auto faceNormal = vFaceNormal[i];
+		auto faceOffset = vBoxHalfSize[i];
+
+		SimpleMath::Vector3 vFaceTB[] = { vFaceNormal[(i + 1) % 3], vFaceNormal[(i + 2) % 3] };
+		float vFaceHalfSize[] = { vBoxHalfSize[(i + 1) % 3], vBoxHalfSize[(i + 2) % 3] };
+
+		for (int j = 0; j < 2; j++)
+		{
+			faceNormal *= -1.0f;
+
+			if (faceNormal.Dot(worldDistance) < .0f)
+			{
+				float _t = 1.0f;
+				SimpleMath::Vector3 _impactPoint;
+				SimpleMath::Vector3 _impactNormal;
+
+				float last_t;
+				SimpleMath::Vector3 lastImpactPoint;
+
+				auto faceOrigin = boxBasis.Translation() + faceOffset * faceNormal;
+
+				{
+					SimpleMath::Matrix faceBasis(
+						vec4(vFaceTB[0], 0),
+						vec4(vFaceTB[1], 0),
+						vec4(faceNormal, 0),
+						vec4(faceOrigin, 1)
+					);
+
+					SimpleMath::Vector2 faceHalfSize(
+						vFaceHalfSize[0],
+						vFaceHalfSize[1]
+					);
+
+					bool lastCollison = collisionWithFace(cylinder, faceBasis, faceHalfSize, worldDistance, lastImpactPoint, last_t);
+
+					if (lastCollison)
+					{
+						if (last_t <= _t)
+						{
+							collison = true;
+							_t = last_t;
+							_impactPoint = lastImpactPoint;
+							_impactNormal = faceNormal;
+						}
+					}
+				}
+
+				{
+					SimpleMath::Vector3 edgeNormal;
+
+					for (int k = 0; k < 2; k++)
+					{
+						auto baseLineA = faceOrigin + vFaceHalfSize[k % 2] * vFaceTB[k % 2];
+						auto baseLineB = faceOrigin - vFaceHalfSize[k % 2] * vFaceTB[k % 2];
+
+						auto lineOffset = vFaceHalfSize[(k + 1) % 2] * vFaceTB[(k + 1) % 2];
+
+						for (int l = 0; l < 2; l++)
+						{
+							lineOffset *= -1.0f;
+
+							auto lineA = baseLineA + lineOffset;
+							auto lineB = baseLineB + lineOffset;
+
+							Line line(lineA.x, lineA.y, lineA.z, lineB.x, lineB.y, lineB.z);
+
+							bool lastCollison = collisionWithEdge(cylinder, line, worldDistance, lastImpactPoint, last_t);
+
+							{
+								auto midPoint = 0.5f*(line.A + line.B);
+								auto tangent0 = midPoint - faceOrigin;
+								tangent0.Normalize();
+								if ((line.A - lastImpactPoint).LengthSquared() < epsilon || (line.B - lastImpactPoint).LengthSquared() < epsilon)
+								{
+									auto tangent1 = lastImpactPoint - midPoint;
+									tangent1.Normalize();
+									edgeNormal = (faceNormal);// +tangent0 + tangent1);
+									edgeNormal.Normalize();
+								}
+								else
+								{
+									edgeNormal = (faceNormal);// +tangent0);
+									edgeNormal.Normalize();
+								}
+							}
+							
+							if (lastCollison)
+							{
+								if (last_t <= _t)
+								{
+									collison = true;
+									_t = last_t;
+									_impactPoint = lastImpactPoint;
+									_impactNormal = edgeNormal;
+								}
+							}
+						}
+					}
+				}
+
+				if (collison)
+				{
+					impactPoint = _impactPoint;
+					impactNormal = _impactNormal;
+					impactT = _t;
+					return collison;
+				}
+			}
+		}
+	}
+
+	return collison;
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+int collisionShapesCount()
+{
+	return 1;
+}
+void physCollision(const int & index, const SimpleMath::Vector3 & worldDistance, SimpleMath::Vector3 & impactPoint, SimpleMath::Vector3 & impactNormal, float & t)
+{
+	SimpleMath::Matrix boxBasis(
+		vec4(SimpleMath::Vector3(1, 0, 0), 0),
+		vec4(SimpleMath::Vector3(0, 1, 0), 0),
+		vec4(SimpleMath::Vector3(0, 0, 1), 0),
+		vec4(0.5f*(SimpleMath::Vector3(50, 2, 8) + SimpleMath::Vector3(11, 0, 50)), 1)
+		);
+
+	SimpleMath::Vector3 boxHalfSize(10, 10, 10);
+
+	collisionWithBox(cylinder, boxBasis, boxHalfSize, worldDistance, impactPoint, impactNormal, t);
+}
+void physCollision(bool sweep, const SimpleMath::Vector3 & worldDistance, SimpleMath::Vector3 & impactPoint, SimpleMath::Vector3 & impactNormal, SimpleMath::Vector3 & direction)
+{
+	float epsilon = 0.001f;
+
+	direction = worldDistance;
+	direction.Normalize();
+
+	float min_t = 1.0f, t;
+
+	for (int i = 0; i < collisionShapesCount(); i++)
+	{
+		physCollision(i, worldDistance, impactPoint, impactNormal, t);
+
+		if (t < min_t)
+			min_t = t;
+	}
+
+	cylinder.A += min_t*worldDistance;
+	cylinder.B += min_t*worldDistance;
+
+	if (!sweep)
+	{
+		return;
+	}
+
+	{
+		float remaining_t = 1.0 - min_t;
+
+		if (remaining_t > epsilon)
+		{
+			auto perpWorldDir = worldDistance - worldDistance.Dot(impactNormal) * impactNormal;
+			perpWorldDir.Normalize();
+			direction = perpWorldDir;
+
+			auto remainingWorldDistance = worldDistance.Length() * perpWorldDir;
+
+			SimpleMath::Vector3 remainingImpactPoint;
+
+			SimpleMath::Vector3 remainingImpactNormal;
+		
+			min_t = 1.0f;
+
+			for (int i = 0; i < collisionShapesCount(); i++)
+			{
+				physCollision(i, remainingWorldDistance, remainingImpactPoint, remainingImpactNormal, remaining_t);
+
+				if (remaining_t < min_t)
+					min_t = remaining_t;
+			}
+
+			cylinder.A += min_t*remainingWorldDistance;
+			cylinder.B += min_t*remainingWorldDistance;
+		}
+	}
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+void set_point_direction(DirectX::XMFLOAT4 point, DirectX::XMFLOAT4 direction, DirectX::XMFLOAT4 color);
+
+void renderScene(ID3D11Device* pd3dDevice, ID3D11DeviceContext* context, float fElapsedTime, IEffect* effect, bool renderIntoShadowMap){
+	float epsilon = 0.001f;
+	SimpleMath::Matrix ToCylinderLocalSpace;
+	auto cylinderBA = cylinder.B - cylinder.A;
+	auto lineBA = line.B - line.A;
+	{
+		// std make frame
+		// trivial impl
+		SimpleMath::Vector3 X(1, 0, 0);
+		auto Y = cylinderBA;
+		Y.Normalize();
+
+		// check X collinearity
+		if (1.0f - abs(X.Dot(Y)) < epsilon)
+		{
+			X = SimpleMath::Vector3(0, 1, 0);
+		}
+
+		auto Z = X.Cross(Y);
+		X = Y.Cross(Z);
+
+		X.Normalize();
+		Y.Normalize();
+		Z.Normalize();
+		// Cylinder it is Y
+		ToCylinderLocalSpace = SimpleMath::Matrix(X, Y, Z);
+		ToCylinderLocalSpace = ToCylinderLocalSpace.Transpose();
+	}
+	SimpleMath::Matrix boxBasis(
+		vec4(SimpleMath::Vector3(1, 0, 0), 0),
+		vec4(SimpleMath::Vector3(0, 1, 0), 0),
+		vec4(SimpleMath::Vector3(0, 0, 1), 0),
+		vec4(0.5f*(SimpleMath::Vector3(50, 2, 8) + SimpleMath::Vector3(11, 0, 50)), 1)
+		);
+	SimpleMath::Vector3 boxHalfSize(10, 10, 10);
+	auto worldDistance = velocity*fElapsedTime;
+	if (!renderIntoShadowMap && worldDistance.Length() > 0.0f)
+	{
+		//collision = collisionWithEdge(cylinder, line, worldDistance, impactPoint);
+		physCollision(true, worldDistance, impactPoint, impactNormal, capsuleDirecion);
+	}
+	if (forcePush)
+	{
+		physCollision(true, worldDistance, impactPoint, impactNormal, capsuleDirecion);
+		forcePush = false;
+	}
+	{
+		set_scene_world_matrix(SimpleMath::Matrix::CreateTranslation(impactPoint));
+		set_scene_constant_buffer(context);
+
+		G->sphere_model2->Draw(G->model_green_wireframe_effect.get(), G->cylinder_model_input_layout.Get(), false, false, [=]{
+			context->OMSetBlendState(G->render_states->Opaque(), Colors::Black, 0xFFFFFFFF);
+			context->RSSetState(G->render_states->Wireframe());
+			context->OMSetDepthStencilState(G->render_states->DepthDefault(), 0);
+		});
+	}
+	{
+		auto H = cylinder.A - cylinder.B;
+		set_scene_world_matrix(SimpleMath::Matrix::CreateScale(cylinder.r, H.Length(), cylinder.r) * SimpleMath::Matrix::CreateTranslation(0, 0.5f*H.Length(), 0) * ToCylinderLocalSpace.Transpose() * SimpleMath::Matrix::CreateTranslation(cylinder.A));
+		set_scene_constant_buffer(context);
+
+		G->cylinder_model->Draw(G->model_wite_wireframe_effect.get(), G->cylinder_model_input_layout.Get(), false, false, [=]{
+			context->OMSetBlendState(G->render_states->Opaque(), Colors::Black, 0xFFFFFFFF);
+			context->RSSetState(G->render_states->Wireframe());
+			context->OMSetDepthStencilState(G->render_states->DepthDefault(), 0);
+		});
+
+		set_scene_world_matrix(SimpleMath::Matrix::CreateScale(cylinder.r * 4, cylinder.r * 4, cylinder.r * 4) * SimpleMath::Matrix::CreateTranslation(cylinder.A));
+		set_scene_constant_buffer(context);
+
+		G->sphere_model2->Draw(G->model_green_wireframe_effect.get(), G->cylinder_model_input_layout.Get(), false, false, [=]{
+			context->OMSetBlendState(G->render_states->Opaque(), Colors::Black, 0xFFFFFFFF);
+			context->RSSetState(G->render_states->Wireframe());
+			context->OMSetDepthStencilState(G->render_states->DepthDefault(), 0);
+		});
+
+		set_scene_world_matrix(SimpleMath::Matrix::CreateScale(cylinder.r * 4, cylinder.r * 4, cylinder.r * 4) * SimpleMath::Matrix::CreateTranslation(cylinder.B));
+		set_scene_constant_buffer(context);
+
+		G->sphere_model2->Draw(G->model_green_wireframe_effect.get(), G->cylinder_model_input_layout.Get(), false, false, [=]{
+			context->OMSetBlendState(G->render_states->Opaque(), Colors::Black, 0xFFFFFFFF);
+			context->RSSetState(G->render_states->Wireframe());
+			context->OMSetDepthStencilState(G->render_states->DepthDefault(), 0);
+		});
+	}
+	{
+		{
+			// std make frame
+			// check X collinearity omitted
+			// trivial impl
+			SimpleMath::Vector3 X(1, 0, 0);
+			auto Y = line.B - line.A;
+			auto Z = X.Cross(Y);
+			X = Y.Cross(Z);
+			X.Normalize();
+			Y.Normalize();
+			Z.Normalize();
+			// Cylinder it is Y
+			auto FromLineLocalSpace = SimpleMath::Matrix(X, Y, Z);
+
+			//set_scene_world_matrix(SimpleMath::Matrix::CreateScale(1, 150, 1) * FromLineLocalSpace * SimpleMath::Matrix::CreateTranslation(line.A));
+			//set_scene_constant_buffer(context);
+
+			//G->cylinder_model->Draw(G->model_wite_wireframe_effect.get(), G->cylinder_model_input_layout.Get(), false, false, [=]{
+			//	context->OMSetBlendState(G->render_states->Opaque(), Colors::Black, 0xFFFFFFFF);
+			//	context->RSSetState(G->render_states->Wireframe());
+			//	context->OMSetDepthStencilState(G->render_states->DepthDefault(), 0);
+			//});
+
+			context->GSSetConstantBuffers(0, 1, constantBuffersToArray(*(G->scene_constant_buffer)));
+			context->PSSetConstantBuffers(0, 1, constantBuffersToArray(*(G->scene_constant_buffer)));
+
+			set_scene_world_matrix(SimpleMath::Matrix::Identity);
+			if (impactPoint.Length() > 0.001)
+			{
+				set_point_direction(vec4(impactPoint, 1.0f), vec4(capsuleDirecion, 0.0f), SimpleMath::Vector4(0, 0, 1, 0));
+			}
+			else
+			{
+				set_point_direction(vec4(cylinder.r * capsuleDirecion + 0.5f*(cylinder.A + cylinder.B), 1.0f), vec4(capsuleDirecion, 0.0f), SimpleMath::Vector4(0, 0, 1, 0));
+			}
+			set_scene_constant_buffer(context);
+
+			ortho_box_draw(context, G->red_line_effect.get(), 0, [=]{
+				context->OMSetBlendState(G->render_states->Opaque(), Colors::Black, 0xFFFFFFFF);
+				context->RSSetState(G->render_states->Wireframe());
+				context->OMSetDepthStencilState(G->render_states->DepthDefault(), 0);
+			});
+
+			if (impactPoint.Length() > 0.001)
+			{
+				set_scene_world_matrix(SimpleMath::Matrix::Identity);
+				set_point_direction(vec4(impactPoint, 1.0f), vec4(impactNormal, 0.0f), SimpleMath::Vector4(1, 0, 0, 0));
+				set_scene_constant_buffer(context);
+
+				ortho_box_draw(context, G->red_line_effect.get(), 0, [=]{
+					context->OMSetBlendState(G->render_states->Opaque(), Colors::Black, 0xFFFFFFFF);
+					context->RSSetState(G->render_states->Wireframe());
+					context->OMSetDepthStencilState(G->render_states->DepthDefault(), 0);
+				});
+			}
+		}
+	}
+	{
+		context->GSSetConstantBuffers(0, 1, constantBuffersToArray(*(G->scene_constant_buffer)));
+
+		ortho_box_set_world_matrix2(SimpleMath::Matrix::CreateScale(2.0f*boxHalfSize) * boxBasis);
+
+		set_scene_constant_buffer(context);
+
+		ortho_box_draw(context, G->ortho_box_effect.get(), 0, [=]{
+			context->OMSetBlendState(G->render_states->Opaque(), Colors::Black, 0xFFFFFFFF);
+			context->RSSetState(G->render_states->Wireframe());
+			context->OMSetDepthStencilState(G->render_states->DepthDefault(), 0);
+		});
+	}
+	{
+		using namespace SimpleMath;
+		Vector3 A1(5,10,11), B1(50,12,13);
+		Vector3 A2(17,2,8), B2(11,0,50);
+
+		auto ret = getDistanceBetweenSkewLines(A1, B1 - A1, A2, B2 - A2);
+		auto C1 = A1 + ret.x*(B1 - A1);
+		auto D1 = A2 + ret.y*(B2 - A2);
+
+		ret = getDistanceBetweenSkewLines(A1 + Vector3(5, 85, 20), B1 - A1, A2, B2 - A2);
+		auto E1 = A1 + ret.x*(B1 - A1);
+		auto F1 = A2 + ret.y*(B2 - A2);
+
+		auto t1 = D1 - C1; t1.Normalize();
+		auto t2 = F1 - E1; t2.Normalize();
+
+		auto test = t1.Dot(t2);
+
+		context->PSSetConstantBuffers(0, 1, constantBuffersToArray(*(G->scene_constant_buffer)));
+		//SimpleMath::
+	}
+
+	context->PSSetConstantBuffers(0, 1, constantBuffersToArray(*(G->scene_constant_buffer)));
+	context->VSSetConstantBuffers(0, 1, constantBuffersToArray(*(G->scene_constant_buffer)));
+
+	context->PSSetSamplers(0, 2, samplerStateToArray(G->render_states->AnisotropicClamp(), G->render_states->AnisotropicWrap()));
+
+	/*
+	sphere_set_world_matrix();
+
+	set_scene_constant_buffer(context);
+
+	sphere_draw(context, effect, G->model_input_layout.Get(), [=]{
+		context->PSSetShaderResources(0, 1, shaderResourceViewToArray(G->ice_texture.Get()));
+
+		context->OMSetBlendState(G->render_states->Opaque(), Colors::Black, 0xFFFFFFFF);
+		context->RSSetState(G->render_states->CullCounterClockwise());
+		context->OMSetDepthStencilState(G->render_states->DepthDefault(), 0);
+	});
+
+	cube_set_world_matrix();
+
+	set_scene_constant_buffer(context);
+
+	cube_draw(context, effect, G->model_input_layout.Get(), [=]{
+		context->PSSetShaderResources(0, 1, shaderResourceViewToArray(G->wall_texture.Get()));
+
+		context->OMSetBlendState(G->render_states->Opaque(), Colors::Black, 0xFFFFFFFF);
+		context->RSSetState(G->render_states->CullCounterClockwise());
+		context->OMSetDepthStencilState(G->render_states->DepthDefault(), 0);
+	});
+	*/
+
+	tree_set_world_matrix();
+
+	set_scene_constant_buffer(context);
+	/*
+	tree_trunk_draw(context, effect, G->model_input_layout.Get(), [=]{
+		context->PSSetShaderResources(0, 1, shaderResourceViewToArray(G->trunk_texture.Get()));
+
+		context->OMSetBlendState(G->render_states->Opaque(), Colors::Black, 0xFFFFFFFF);
+		context->RSSetState(G->render_states->CullCounterClockwise());
+		context->OMSetDepthStencilState(G->render_states->DepthDefault(), 0);
+	});
+
+	tree_leaf_draw(context, effect, G->model_input_layout.Get(), [=]{
+		context->PSSetShaderResources(0, 1, shaderResourceViewToArray(G->leaf_texture.Get()));
+
+		context->OMSetBlendState(renderIntoShadowMap ? G->render_states->Opaque() : G->m_pBlendState.Get(), Colors::Black, 0xFFFFFFFF);
+		context->RSSetState(G->render_states->CullNone());
+		context->OMSetDepthStencilState(G->render_states->DepthDefault(), 0);
+	});
+	*/
+	plane_set_world_matrix();
+
+	set_scene_constant_buffer(context);
+
+	plane_draw(context, effect, G->model_input_layout.Get(), [=]{
+		context->PSSetShaderResources(0, 1, shaderResourceViewToArray(G->metal_texture.Get()));
+
+		context->OMSetBlendState(G->render_states->Opaque(), Colors::Black, 0xFFFFFFFF);
+		context->RSSetState(G->render_states->CullCounterClockwise());
+		context->OMSetDepthStencilState(G->render_states->DepthDefault(), 0);
+	});
+}
+/*
+void postProccessBlur(ID3D11Device* pd3dDevice, ID3D11DeviceContext* context, _In_opt_ std::function<void __cdecl()> setHState, _In_opt_ std::function<void __cdecl()> setVState){
+	/////
+	context->PSSetConstantBuffers(0, 2, constantBuffersToArray(*(G->scene_constant_buffer), *(G->blur_constant_buffer)));
+	/////
+
+	set_scene_world_matrix(SimpleMath::Matrix::Identity);
+
+	set_scene_constant_buffer(context);
+
+	setHState();
+
+	post_proccess(context, G->blur_h_effect.get(), 0, [=]{
+		context->OMSetBlendState(G->render_states->Opaque(), Colors::White, 0xFFFFFFFF);
+		context->RSSetState(G->render_states->CullNone());
+		context->OMSetDepthStencilState(G->render_states->DepthNone(), 0);
+	});
+
+	setVState();
+
+	post_proccess(context, G->blur_v_effect.get(), 0, [=]{
+		context->OMSetBlendState(G->render_states->Opaque(), Colors::White, 0xFFFFFFFF);
+		context->RSSetState(G->render_states->CullNone());
+		context->OMSetDepthStencilState(G->render_states->DepthNone(), 0);
+	});
+
+	context->PSSetConstantBuffers(0, 2, constantBuffersToArray(0, 0));
+}
+*/
+/*
+void postProccessGBuffer(ID3D11Device* pd3dDevice, ID3D11DeviceContext* context){
+	/////
+	context->PSSetConstantBuffers(0, 1, constantBuffersToArray(*(G->scene_constant_buffer)));
+	/////
+
+	set_scene_world_matrix(SimpleMath::Matrix::Identity);
+
+	set_scene_constant_buffer(context);
+
+	post_proccess(context, G->quad_effect.get(), G->quad_mesh_layout.Get(), [=]{
+		context->PSSetShaderResources(0, 3, shaderResourceViewToArray(
+			SCG->colorSRV.Get(),
+			SCG->normalSRV.Get()
+			//SCG->depthStencilSRV.Get()
+			)
+		);
+
+		context->OMSetBlendState(G->render_states->Opaque(), Colors::White, 0xFFFFFFFF);
+		context->RSSetState(G->render_states->CullNone());
+		context->OMSetDepthStencilState(G->render_states->DepthNone(), 0);
+	});
+}
+*/
+/*
+void renderSceneIntoGBuffer(ID3D11Device* pd3dDevice, ID3D11DeviceContext* context)
+{
+	/////
+	context->VSSetConstantBuffers(0, 1, constantBuffersToArray(*(G->scene_constant_buffer)));
+	
+	context->PSSetSamplers(0, 1, samplerStateToArray(G->render_states->AnisotropicWrap()));
+	/////
+
+	ground_set_world_matrix();
+
+	set_scene_constant_buffer(context);
+
+	ground_draw(context, G->model_effect.get(), G->model_input_layout.Get(), [=]{
+		context->PSSetShaderResources(0, 1, shaderResourceViewToArray(G->ground_texture.Get()));
+
+		context->OMSetBlendState(G->render_states->Opaque(), Colors::Black, 0xFFFFFFFF);
+		context->RSSetState(G->render_states->CullCounterClockwise());
+		context->OMSetDepthStencilState(G->render_states->DepthDefault(), 0);
+	});
+
+	wall_set_world_matrix();
+
+	set_scene_constant_buffer(context);
+
+	wall_draw(context, G->model_effect.get(), G->model_input_layout.Get(), [=]{
+		context->PSSetShaderResources(0, 1, shaderResourceViewToArray(G->wall_texture.Get()));
+
+		context->OMSetBlendState(G->render_states->Opaque(), Colors::Black, 0xFFFFFFFF);
+		context->RSSetState(G->render_states->CullCounterClockwise());
+		context->OMSetDepthStencilState(G->render_states->DepthDefault(), 0);
+	});
+}
+*/

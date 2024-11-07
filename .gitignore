@@ -1,0 +1,8 @@
+﻿# ignore
+/packages/directxtk_desktop_2013.2018.4.23.1
+/CrazyGem/Debug
+*.aps
+*.sdf
+*.suo
+*.opensdf
+/Debug

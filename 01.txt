@@ -1,0 +1,44 @@
+    /*
+    const float bias = 0.001f;
+
+    const float3 lightDir = normalize(float3(0.707,0.707,0));
+
+    float4 diffuseColor = float4(1.0f, 1.0f, 1.0f, 1.0f);
+
+    float4 textureColor = diffuseTexture.Sample(SampleTypeWrap, tex);
+
+    float4 color = float4(0.0f, 0.0f, 0.0f, 1.0f);
+   
+    float3 L = L1.xyz;
+
+    L /= L1.w;
+
+    L.xy *= float2(0.5, -0.5);
+
+    L.xy += float2(0.5,  0.5);    
+    
+    if((saturate(L.x) == L.x) && (saturate(L.y) == L.y))
+    {
+        float depthValue = depth1.Sample(SampleTypeClamp, L.xy).x;
+
+        float lightDepthValue = L.z - bias;
+
+        if(saturate(lightDepthValue) < saturate(depthValue))
+        {
+            //float lightIntensity = saturate(dot(normalize( normal ), lightDir));
+
+            //if(lightIntensity > 0.0f)
+            {
+                color = textureColor;// * diffuseColor * lightIntensity;
+
+                color = saturate(color);
+            }
+        }
+    }
+
+    //color = textureColor;
+
+    color = saturate(color);
+
+    return color;
+    */
